@@ -95,20 +95,10 @@ def extract_attachments(msg):
     return attachments
 
 
-def send_to_papra(cfg, from_addr, to_addr, attachments):
-    webhook_url = cfg["webhook_url"]
-    secret = cfg["webhook_secret"]
-    intake_address = cfg.get("intake_address", to_addr)
-    timeout = int(cfg.get("timeout", 30))
-
-    email_json = json.dumps({
-        "from": {"address": from_addr},
-        "to": [{"address": intake_address}],
-        "originalTo": [],
-    })
-
+def post_attachment(webhook_url, secret, timeout, email_json, filename, mime_type, data):
+    """Send a single attachment to Papra. Returns EX_OK or EX_TEMPFAIL."""
     boundary = b"PapraBoundary" + uuid.uuid4().hex[:16].encode()
-    body = build_multipart(boundary, email_json, attachments)
+    body = build_multipart(boundary, email_json, [(filename, mime_type, data)])
     signature = sign_body(body, secret)
 
     req = urllib.request.Request(
@@ -124,15 +114,34 @@ def send_to_papra(cfg, from_addr, to_addr, attachments):
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            log.info("Papra OK: HTTP %d", resp.status)
+            log.info("Papra OK für '%s': HTTP %d", filename, resp.status)
             return EX_OK
     except urllib.error.HTTPError as exc:
-        body_bytes = exc.read()
-        log.error("HTTP-Fehler %d — %s", exc.code, body_bytes)
+        log.error("HTTP-Fehler für '%s': %d — %s", filename, exc.code, exc.read())
         return EX_OK  # 4xx = permanent error, don't retry
-    except (urllib.error.URLError, OSError) as exc:
-        log.error("Netzwerkfehler — %s", exc)
+    except Exception as exc:
+        log.error("Fehler für '%s': %s", filename, exc)
         return EX_TEMPFAIL
+
+
+def send_to_papra(cfg, from_addr, to_addr, attachments):
+    webhook_url = cfg["webhook_url"]
+    secret = cfg["webhook_secret"]
+    intake_address = cfg.get("intake_address", to_addr)
+    timeout = int(cfg.get("timeout", 30))
+
+    email_json = json.dumps({
+        "from": {"address": from_addr},
+        "to": [{"address": intake_address}],
+        "originalTo": [],
+    })
+
+    result = EX_OK
+    for filename, mime_type, data in attachments:
+        rc = post_attachment(webhook_url, secret, timeout, email_json, filename, mime_type, data)
+        if rc != EX_OK:
+            result = rc  # keep EX_TEMPFAIL so Postfix retries the whole mail
+    return result
 
 
 def main():
@@ -163,9 +172,7 @@ def main():
         log.warning("Keine Anhänge und kein Text-Body — Mail wird ignoriert")
         sys.exit(EX_OK)
 
-    for filename, mime_type, data in attachments:
-        log.info("Anhang: %s (%s, %d Bytes)", filename, mime_type, len(data))
-
+    log.info("%d Anhang/Anhänge gefunden", len(attachments))
     sys.exit(send_to_papra(cfg, from_addr, to_addr, attachments))
 
 
