@@ -1,0 +1,7 @@
+# Local config with secrets — never commit
+email2papra.conf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
